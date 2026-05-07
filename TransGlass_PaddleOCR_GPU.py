@@ -2180,7 +2180,6 @@ class TranslationFilterDialog(QDialog):
         lang_row.addWidget(QLabel("识别语言:"))
         self.lang_combo = QComboBox()
         self.lang_combo.setMinimumWidth(140)
-        layout.addLayout(lang_row)
         lang_row_w = QWidget()
         lang_row_w.setLayout(lang_row)
         layout.addWidget(lang_row_w)
