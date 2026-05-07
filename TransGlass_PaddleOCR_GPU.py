@@ -511,38 +511,6 @@ class ComicBubbleMerger:
         else:
             print(f"[OCR诊断] 置信度过滤后无有效数据，保持原结果")
         
-        # 拟声词过滤：当选项开启时，拟声词单独成块，不参与合并
-        normal_blocks = []
-        ono_blocks = []
-        ono_dialogs = []   # 初始化，避免ono_blocks为空时return处报错
-        if filter_onomatopoeia:
-            for b in filtered:
-                if is_onomatopoeia(b.get('text', '')):
-                    print(f"    [拟声词] '{b['text']}' 不参与合并，保持原文")
-                    b['onomatopoeia'] = True
-                    ono_blocks.append(b)
-                else:
-                    normal_blocks.append(b)
-            print(f"[OCR诊断] 拟声词分离: {len(ono_blocks)} 个拟声词, {len(normal_blocks)} 个正常")
-            if ono_blocks:
-                ono_dialogs = []
-                for ob in ono_blocks:
-                    ono_dialogs.append({
-                        'bg_x1': ob['x1'], 'bg_y1': ob['y1'],
-                        'bg_x2': ob['x2'], 'bg_y2': ob['y2'],
-                        'text': ob['text'],
-                        'lines': [{'text': ob['text'], 'x1': ob['x1'], 'y1': ob['y1'],
-                                   'x2': ob['x2'], 'y2': ob['y2']}],
-                        'onomatopoeia': True,
-                    })
-            if not normal_blocks:
-                # 全是拟声词，直接返回
-                print(f"[合并] 全为拟声词: {len(ono_dialogs)} 个独立块")
-                return ono_dialogs
-            filtered = normal_blocks
-        else:
-            pass  # ono_dialogs 已在 if 前初始化
-        
         filtered.sort(key=lambda b: (b['y1'], b['x1']))
         
         # 按Y坐标分组到行
@@ -586,6 +554,7 @@ class ComicBubbleMerger:
         print(f"  [统计] g(字符高):{g:.1f}  k(字符宽):{k:.1f}  j(框宽):{j:.1f}")
         
         # 超大文字框检测：高度超过 k * oversized_ratio 的块不参与合并和翻译
+        ono_dialogs = []   # 超大框独立块列表
         if filter_oversized:
             oversize_blocks = []
             normal_for_merge = []
@@ -607,11 +576,12 @@ class ComicBubbleMerger:
                         'lines': [{'text': ob['text'], 'x1': ob['x1'], 'y1': ob['y1'],
                                    'x2': ob['x2'], 'y2': ob['y2']}],
                         'oversized': True,
+                        'x1': ob['x1'], 'y1': ob['y1'], 'x2': ob['x2'], 'y2': ob['y2'],
                     })
                 print(f"[OCR诊断] 超大框分离: {len(oversize_blocks)} 个")
                 filtered = normal_for_merge if normal_for_merge else []
                 if not filtered:
-                    print(f"[合并] 全为超大框和拟声词: {len(ono_dialogs)} 个独立块")
+                    print(f"[合并] 全为超大框: {len(ono_dialogs)} 个独立块")
                     return ono_dialogs
         
         dialogs = []
@@ -664,7 +634,7 @@ class ComicBubbleMerger:
         
         print(f"[合并] {len(text_blocks)} -> {len(dialogs)} 个对话框")
         if ono_dialogs:
-            print(f"[合并] + {len(ono_dialogs)} 个拟声词独立块")
+            print(f"[合并] + {len(ono_dialogs)} 个超大框独立块")
             dialogs.extend(ono_dialogs)
         return dialogs
 
@@ -1491,15 +1461,12 @@ class RecognizeThread(QThread):
             
             translator = OllamaTranslator(selected_model)
             
-            # 分离拟声词和超大框块（不翻译，直接使用原文）
+            # 分离超大框块（不翻译，直接使用原文）
             translate_blocks = []
             translate_indices = []
             skip_results = {}  # idx -> original_text
             for i, b in enumerate(text_blocks):
-                if b.get('onomatopoeia'):
-                    skip_results[i] = b['text']
-                    print(f"  [{i+1:2d}] [拟声词跳过翻译] '{b['text']}'")
-                elif b.get('oversized'):
+                if b.get('oversized'):
                     skip_results[i] = b['text']
                     print(f"  [{i+1:2d}] [超大框跳过翻译] '{b['text']}'")
                 else:
@@ -1570,9 +1537,7 @@ class RecognizeThread(QThread):
             for i, b in enumerate(text_blocks):
                 orig = b['text']
                 trans = all_translations[i] if i < len(all_translations) else ""
-                if b.get('onomatopoeia'):
-                    print(f"  [{i+1:2d}] [拟声词] {orig}")
-                elif b.get('oversized'):
+                if b.get('oversized'):
                     print(f"  [{i+1:2d}] [超大框] {orig}")
                 else:
                     print(f"  [{i+1:2d}] 原文: {orig[:40]}")
@@ -1650,7 +1615,6 @@ class RecognizeThread(QThread):
                     'translated': all_translations[i] if i < len(all_translations) else b['text'],
                     '_screen': f"{screen_info['width']}x{screen_info['height']}",
                     '_scale_factor': scale_factor,
-                    'onomatopoeia': b.get('onomatopoeia', False),
                     'oversized': b.get('oversized', False),
                 }
                 for i, (b, c) in enumerate(zip(text_blocks, bg_colors))
@@ -2204,13 +2168,7 @@ class TranslationFilterDialog(QDialog):
         self.cb_untranslated.toggled.connect(self._on_filter_changed)
         layout.addWidget(self.cb_untranslated)
         
-        # 勾选项2: 拟声词不翻译不合并
-        self.cb_onomatopoeia = QCheckBox("纯粹拟声词，不翻译，不合并")
-        self.cb_onomatopoeia.setChecked(filter_onomatopoeia)
-        self.cb_onomatopoeia.toggled.connect(self._on_filter_changed)
-        layout.addWidget(self.cb_onomatopoeia)
-
-        # 勾选项3: 超大文字框过滤
+        # 勾选项2: 超大文字框过滤
         oversized_row = QVBoxLayout()
         self.cb_oversized = QCheckBox("文字框高度超过中位数平均值")
         self.cb_oversized.setChecked(filter_oversized)
@@ -2267,15 +2225,13 @@ class TranslationFilterDialog(QDialog):
             print(f"[成功] 已切换: 识别{SUPPORTED_LANGUAGES[lang_code]['label']}, 翻译成{target}")
     
     def _on_filter_changed(self):
-        global filter_untranslated_separate, filter_onomatopoeia, filter_oversized
+        global filter_untranslated_separate, filter_oversized
         filter_untranslated_separate = self.cb_untranslated.isChecked()
-        filter_onomatopoeia = self.cb_onomatopoeia.isChecked()
         filter_oversized = self.cb_oversized.isChecked()
         config["filter_untranslated_separate"] = filter_untranslated_separate
-        config["filter_onomatopoeia"] = filter_onomatopoeia
         config["filter_oversized"] = filter_oversized
         save_config()
-        print(f"[信息] 过滤选项: 未翻译分离={filter_untranslated_separate}, 拟声词跳过={filter_onomatopoeia}, 超大框跳过={filter_oversized}({oversized_ratio:.1f}x)")
+        print(f"[信息] 过滤选项: 未翻译分离={filter_untranslated_separate}, 超大框跳过={filter_oversized}({oversized_ratio:.1f}x)")
     
     def _on_ratio_changed(self, val):
         global oversized_ratio
