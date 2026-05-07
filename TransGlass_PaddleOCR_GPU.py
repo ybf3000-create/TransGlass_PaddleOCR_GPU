@@ -513,7 +513,7 @@ class ComicBubbleMerger:
         
         # 拟声词过滤：当选项开启时，拟声词单独成块，不参与合并
         normal_blocks = []
-        ono_blocks = []
+        ono_dialogs = []   # 初始化，避免ono_blocks为空时return处报错
         if filter_onomatopoeia:
             for b in filtered:
                 if is_onomatopoeia(b.get('text', '')):
@@ -524,7 +524,6 @@ class ComicBubbleMerger:
                     normal_blocks.append(b)
             print(f"[OCR诊断] 拟声词分离: {len(ono_blocks)} 个拟声词, {len(normal_blocks)} 个正常")
             if ono_blocks:
-                # 拟声词每个单独成块（作为已合并的对话返回）
                 ono_dialogs = []
                 for ob in ono_blocks:
                     ono_dialogs.append({
@@ -541,7 +540,7 @@ class ComicBubbleMerger:
                 return ono_dialogs
             filtered = normal_blocks
         else:
-            ono_dialogs = []
+            pass  # ono_dialogs 已在 if 前初始化
         
         filtered.sort(key=lambda b: (b['y1'], b['x1']))
         
