@@ -511,6 +511,38 @@ class ComicBubbleMerger:
         else:
             print(f"[OCR诊断] 置信度过滤后无有效数据，保持原结果")
         
+        # 拟声词过滤：当选项开启时，拟声词单独成块，不参与合并
+        normal_blocks = []
+        ono_blocks = []
+        if filter_onomatopoeia:
+            for b in filtered:
+                if is_onomatopoeia(b.get('text', '')):
+                    print(f"    [拟声词] '{b['text']}' 不参与合并，保持原文")
+                    b['onomatopoeia'] = True
+                    ono_blocks.append(b)
+                else:
+                    normal_blocks.append(b)
+            print(f"[OCR诊断] 拟声词分离: {len(ono_blocks)} 个拟声词, {len(normal_blocks)} 个正常")
+            if ono_blocks:
+                # 拟声词每个单独成块（作为已合并的对话返回）
+                ono_dialogs = []
+                for ob in ono_blocks:
+                    ono_dialogs.append({
+                        'bg_x1': ob['x1'], 'bg_y1': ob['y1'],
+                        'bg_x2': ob['x2'], 'bg_y2': ob['y2'],
+                        'text': ob['text'],
+                        'lines': [{'text': ob['text'], 'x1': ob['x1'], 'y1': ob['y1'],
+                                   'x2': ob['x2'], 'y2': ob['y2']}],
+                        'onomatopoeia': True,
+                    })
+            if not normal_blocks:
+                # 全是拟声词，直接返回
+                print(f"[合并] 全为拟声词: {len(ono_dialogs)} 个独立块")
+                return ono_dialogs
+            filtered = normal_blocks
+        else:
+            ono_dialogs = []
+        
         filtered.sort(key=lambda b: (b['y1'], b['x1']))
         
         # 按Y坐标分组到行
@@ -552,6 +584,35 @@ class ComicBubbleMerger:
         
         global_stats = {'g': g, 'k': k, 'j': j}
         print(f"  [统计] g(字符高):{g:.1f}  k(字符宽):{k:.1f}  j(框宽):{j:.1f}")
+        
+        # 超大文字框检测：高度超过 k * oversized_ratio 的块不参与合并和翻译
+        if filter_oversized:
+            oversize_blocks = []
+            normal_for_merge = []
+            for b in filtered:
+                h = b['y2'] - b['y1']
+                if h > k * oversized_ratio:
+                    print(f"    [超大框] '{b['text']}' 高度={h:.0f} > {k:.1f}x{oversized_ratio:.1f}={k*oversized_ratio:.1f}, 不合并")
+                    b['oversized'] = True
+                    oversize_blocks.append(b)
+                else:
+                    normal_for_merge.append(b)
+            if oversize_blocks:
+                # 超大框每个单独成块
+                for ob in oversize_blocks:
+                    ono_dialogs.append({
+                        'bg_x1': ob['x1'], 'bg_y1': ob['y1'],
+                        'bg_x2': ob['x2'], 'bg_y2': ob['y2'],
+                        'text': ob['text'],
+                        'lines': [{'text': ob['text'], 'x1': ob['x1'], 'y1': ob['y1'],
+                                   'x2': ob['x2'], 'y2': ob['y2']}],
+                        'oversized': True,
+                    })
+                print(f"[OCR诊断] 超大框分离: {len(oversize_blocks)} 个")
+                filtered = normal_for_merge if normal_for_merge else []
+                if not filtered:
+                    print(f"[合并] 全为超大框和拟声词: {len(ono_dialogs)} 个独立块")
+                    return ono_dialogs
         
         dialogs = []
         used = [False] * len(filtered)
@@ -602,6 +663,9 @@ class ComicBubbleMerger:
                 print(f"  [合并] {len(current_group)} 块 -> 对话框 '{merged_text[:40]}...'")
         
         print(f"[合并] {len(text_blocks)} -> {len(dialogs)} 个对话框")
+        if ono_dialogs:
+            print(f"[合并] + {len(ono_dialogs)} 个拟声词独立块")
+            dialogs.extend(ono_dialogs)
         return dialogs
 
 
@@ -625,7 +689,7 @@ try:
         QApplication, QWidget, QSystemTrayIcon, QMenu,
         QStyle, QInputDialog, QMessageBox, QSlider,
         QHBoxLayout, QVBoxLayout, QLabel, QPushButton,
-        QDialog, QLineEdit, QCheckBox
+        QDialog, QLineEdit, QCheckBox, QComboBox
     )
     from PySide6.QtCore import Qt, QObject, Signal, QThread, QTimer, QPoint
     from PySide6.QtGui import (
@@ -655,7 +719,61 @@ def compute_dhash(image_path: str) -> int:
         return 0
 
 
-# ====================== 核心配置 ======================
+# ====================== 拟声词检测 ======================
+# 常见英文拟声词（漫画常见）
+ONOMATOPOEIA_WORDS = set([
+    'BAM', 'BANG', 'BOOM', 'CRASH', 'WHAM', 'SMASH', 'SLAM',
+    'POW', 'ZAP', 'ZOOM', 'VROOM', 'BUZZ', 'CLICK', 'BEEP',
+    'CRACK', 'POP', 'SNAP', 'WHACK', 'THUD', 'THUMP', 'KABOOM',
+    'BOING', 'SPLAT', 'SPLASH', 'DRIP', 'DING', 'DONG', 'RING',
+    'WHOOSH', 'SWISH', 'BUMP', 'CRUNCH', 'MUNCH', 'CHOMP',
+    'GULP', 'SLURP', 'BURP', 'HICCUP', 'SNORE', 'SNIFF', 'GROAN',
+    'SIGH', 'AHEM', 'OOPS', 'WHOOPS', 'WOW', 'YAY', 'YIKES',
+    'HA', 'HEH', 'HMM', 'MMM', 'GRR', 'ARGH', 'UGH', 'EWW',
+    'HEY', 'AHH', 'OWW', 'OUCH', 'EEK', 'WOAH', 'WHOA',
+    'KLANG', 'CLANG', 'CLANK', 'RATTLE', 'SQUEAK', 'CREAK',
+    'DING', 'PING', 'TICK', 'TOCK', 'WHIR', 'HUM',
+    'FWOOOSH', 'SHING', 'SWOOSH', 'THWACK', 'BONK', 'BOFF',
+    # 日语常见拟声词（罗马音/英文拼写）
+    'DO', 'GA', 'GOGO', 'BACHI', 'BISHI', 'GISHI', 'GATAN',
+    'KATAN', 'KACHI', 'DOSA', 'DOKA', 'BOTA', 'PATA', 'KATA',
+    'SUTA', 'SUKA', 'HISHI', 'HYUSHA', 'GOBOU', 'KABO', 'DOKU',
+    'BORO', 'GORO', 'KORO', 'SARA', 'KARA', 'SORO', 'ZARA',
+    'ZUBO', 'GABA', 'MOGA', 'MUGA', 'NIKO', 'NIKO', 'NIKO',
+    'PICA', 'PICA', 'PIKA', 'PIRO', 'PISHI', 'POCHA', 'POKO',
+    'POTA', 'PUKA', 'PUSA', 'PYON', 'PYOKO', 'PIO', 'PEN',
+    'CHAPU', 'CHIRI', 'CHIYO', 'CHO', 'CHOKI', 'DARA', 'DASA',
+    'DEHE', 'DEKO', 'BASA', 'BUSHA', 'BUTO', 'CHAKU', 'CHARA',
+])
+
+# 检测规则：全大写短单词、重复音节等
+ONO_REPEAT_PATTERN = re.compile(r'^([A-Z])\1+$')  # 如 "AA", "BBB", "AAAA"
+
+
+def is_onomatopoeia(text: str) -> bool:
+    """检测是否为拟声词"""
+    if not text or not text.strip():
+        return False
+    t = text.strip().upper()
+    # 过滤标点
+    t_clean = re.sub(r'[.!?,\-…~♪☆★]', '', t).strip()
+    if not t_clean:
+        return False
+    
+    # 规则1: 完全是重复字母（如 AAA, BBBB）
+    if ONO_REPEAT_PATTERN.match(t_clean):
+        return True
+    
+    # 规则2: 在已知拟声词列表中
+    if t_clean in ONOMATOPOEIA_WORDS:
+        return True
+    
+    # 规则3: 长度<=4 且全是字母且全大写
+    upper_ratio = sum(1 for c in t_clean if c.isupper()) / max(len(t_clean), 1)
+    if 2 <= len(t_clean) <= 5 and t_clean.isalpha() and upper_ratio > 0.8:
+        return True
+    
+    return False
 CONFIG_PATH = os.path.join(os.path.expanduser("~"), "transglass_config.json")
 OLLAMA_PORT = 11434
 OLLAMA_URL = f"http://127.0.0.1:{OLLAMA_PORT}"
@@ -681,6 +799,15 @@ merge_g_multiplier = None  # None = 使用规则预设值
 # OCR识别精度参数（可调整）
 ocr_det_thresh = 0.3      # 检测阈值，越低检出越多（默认0.3）
 ocr_det_box_thresh = 0.6  # 文本框置信度阈值（默认0.6）
+
+# 覆盖层透明度
+overlay_alpha = 200       # 0~255, 越低越透明（默认200 ≈ 78%）
+
+# 翻译过滤选项
+filter_untranslated_separate = False  # 未翻译文字框不参与合并
+filter_onomatopoeia = False           # 拟声词不翻译不合并
+filter_oversized = False              # 超大文字框不翻译不合并
+oversized_ratio = 1.5                # 超大文字框倍数阈值（1.0~2.0）
 
 # ====================== 快捷键配置 ======================
 # pynput 按键名称映射（用于显示和组合）
@@ -832,6 +959,30 @@ def load_config():
                 if loaded_box_thresh is not None:
                     ocr_det_box_thresh = loaded_box_thresh
                     
+                # 加载覆盖层透明度
+                loaded_alpha = config.get("overlay_alpha")
+                if loaded_alpha is not None:
+                    global overlay_alpha
+                    overlay_alpha = loaded_alpha
+                
+                # 加载翻译过滤选项
+                loaded_filter1 = config.get("filter_untranslated_separate")
+                if loaded_filter1 is not None:
+                    global filter_untranslated_separate
+                    filter_untranslated_separate = loaded_filter1
+                loaded_filter2 = config.get("filter_onomatopoeia")
+                if loaded_filter2 is not None:
+                    global filter_onomatopoeia
+                    filter_onomatopoeia = loaded_filter2
+                loaded_filter3 = config.get("filter_oversized")
+                if loaded_filter3 is not None:
+                    global filter_oversized
+                    filter_oversized = loaded_filter3
+                loaded_ratio = config.get("oversized_ratio")
+                if loaded_ratio is not None:
+                    global oversized_ratio
+                    oversized_ratio = loaded_ratio
+                    
                 hotkey_config = config.get("hotkeys", {})
                 # 迁移旧版数字键值（如"49"→"1"）
                 _need_save = False
@@ -882,10 +1033,15 @@ def save_config():
         config["merge_g_multiplier"] = merge_g_multiplier
         config["ocr_det_thresh"] = ocr_det_thresh
         config["ocr_det_box_thresh"] = ocr_det_box_thresh
+        config["overlay_alpha"] = overlay_alpha
+        config["filter_untranslated_separate"] = filter_untranslated_separate
+        config["filter_onomatopoeia"] = filter_onomatopoeia
+        config["filter_oversized"] = filter_oversized
+        config["oversized_ratio"] = oversized_ratio
         config["hotkeys"] = hotkey_config
         with open(CONFIG_PATH, 'w', encoding='utf-8') as f:
             json.dump(config, f, ensure_ascii=False, indent=2)
-        print(f"[成功] 配置已保存 (精度: det={ocr_det_thresh}, box={ocr_det_box_thresh})")
+        print(f"[成功] 配置已保存 (精度: det={ocr_det_thresh}, box={ocr_det_box_thresh}, overlay_alpha={overlay_alpha})")
     except Exception as e:
         print(f"[失败] 保存配置失败: {e}")
 
@@ -1334,14 +1490,93 @@ class RecognizeThread(QThread):
             signal_bus.update_tips.emit(f"[信息] 正在翻译 {len(text_blocks)} 处文字 ({source_lang} -> {target_lang})...")
             
             translator = OllamaTranslator(selected_model)
-            texts = [b['text'] for b in text_blocks]
-            translations = translator.translate_batch(texts, target_lang, source_lang)
+            
+            # 分离拟声词和超大框块（不翻译，直接使用原文）
+            translate_blocks = []
+            translate_indices = []
+            skip_results = {}  # idx -> original_text
+            for i, b in enumerate(text_blocks):
+                if b.get('onomatopoeia'):
+                    skip_results[i] = b['text']
+                    print(f"  [{i+1:2d}] [拟声词跳过翻译] '{b['text']}'")
+                elif b.get('oversized'):
+                    skip_results[i] = b['text']
+                    print(f"  [{i+1:2d}] [超大框跳过翻译] '{b['text']}'")
+                else:
+                    translate_blocks.append(b)
+                    translate_indices.append(i)
+            
+            if translate_blocks:
+                texts = [b['text'] for b in translate_blocks]
+                translations = translator.translate_batch(texts, target_lang, source_lang)
+            else:
+                texts = []
+                translations = []
+            
+            # 合并翻译结果（拟声词/超大框位置插入原文）
+            all_translations = [None] * len(text_blocks)
+            for idx_in_orig, trans in zip(translate_indices, translations):
+                all_translations[idx_in_orig] = trans
+            for idx_in_orig, orig_text in skip_results.items():
+                all_translations[idx_in_orig] = orig_text
+            
+            # 未翻译分离：当选项开启时，翻译结果为空（或等于原文/无返回值）的块拆分为单行
+            if filter_untranslated_separate:
+                expanded_blocks = []
+                expanded_translations = []
+                for i, b in enumerate(text_blocks):
+                    trans = all_translations[i] if i < len(all_translations) else ""
+                    if (not trans or len(trans.strip()) < 2) and len(b.get('lines', [])) > 1:
+                        # 情况A: 翻译结果为空/极短 → 空返回
+                        reason = "空返回" if not trans else "返回值过短"
+                        for line in b.get('lines', []):
+                            line_text = line.get('text', '')
+                            if line_text:
+                                expanded_blocks.append({
+                                    'text': line_text,
+                                    'x1': line['x1'], 'y1': line['y1'],
+                                    'x2': line['x2'], 'y2': line['y2'],
+                                    'bg_x1': line['x1'], 'bg_y1': line['y1'],
+                                    'bg_x2': line['x2'], 'bg_y2': line['y2'],
+                                    'lines': [line],
+                                })
+                                expanded_translations.append(line_text)
+                        print(f"  [未翻译分离] 块 '{b['text'][:30]}...' [原因:{reason}] 拆分为 {len(b['lines'])} 行")
+                    elif trans == b['text'] and len(b.get('lines', [])) > 1:
+                        # 情况B: 翻译结果 == 原文 → 原文返回（未翻译）
+                        for line in b.get('lines', []):
+                            line_text = line.get('text', '')
+                            if line_text:
+                                expanded_blocks.append({
+                                    'text': line_text,
+                                    'x1': line['x1'], 'y1': line['y1'],
+                                    'x2': line['x2'], 'y2': line['y2'],
+                                    'bg_x1': line['x1'], 'bg_y1': line['y1'],
+                                    'bg_x2': line['x2'], 'bg_y2': line['y2'],
+                                    'lines': [line],
+                                })
+                                expanded_translations.append(line_text)
+                        print(f"  [未翻译分离] 块 '{b['text'][:30]}...' [原因:原文返回(未翻译)] 拆分为 {len(b['lines'])} 行")
+                    else:
+                        expanded_blocks.append(b)
+                        expanded_translations.append(trans)
+                if len(expanded_blocks) != len(text_blocks):
+                    print(f"[信息] 未翻译分离: {len(text_blocks)} -> {len(expanded_blocks)} 块")
+                    text_blocks = expanded_blocks
+                    all_translations = expanded_translations
             
             # 调试：打印翻译结果对比
             print("[调试] 翻译结果对比:")
-            for i, (orig, trans) in enumerate(zip(texts, translations)):
-                print(f"  [{i+1:2d}] 原文: {orig[:30]}")
-                print(f"       翻译: {trans[:30]}")
+            for i, b in enumerate(text_blocks):
+                orig = b['text']
+                trans = all_translations[i] if i < len(all_translations) else ""
+                if b.get('onomatopoeia'):
+                    print(f"  [{i+1:2d}] [拟声词] {orig}")
+                elif b.get('oversized'):
+                    print(f"  [{i+1:2d}] [超大框] {orig}")
+                else:
+                    print(f"  [{i+1:2d}] 原文: {orig[:40]}")
+                    print(f"       翻译: {trans[:40]}")
             
             if self._stop:
                 return
@@ -1409,14 +1644,16 @@ class RecognizeThread(QThread):
                     'y': int(b['y1'] / scale_factor),
                     'width': int((b['x2'] - b['x1']) / scale_factor),
                     'height': int((b['y2'] - b['y1']) / scale_factor),
-                    'text': t,
+                    'text': all_translations[i] if i < len(all_translations) else b['text'],
                     'bg_color': c,
                     'original': b['text'],
-                    'translated': t,
+                    'translated': all_translations[i] if i < len(all_translations) else b['text'],
                     '_screen': f"{screen_info['width']}x{screen_info['height']}",
                     '_scale_factor': scale_factor,
+                    'onomatopoeia': b.get('onomatopoeia', False),
+                    'oversized': b.get('oversized', False),
                 }
-                for b, t, c in zip(text_blocks, translations, bg_colors)
+                for i, (b, c) in enumerate(zip(text_blocks, bg_colors))
             ]
             
             print(f"[调试] 第一个文本块窗口坐标: x={translation_data[0]['x']}, y={translation_data[0]['y']}, size={translation_data[0]['width']}x{translation_data[0]['height']}")
@@ -1462,7 +1699,7 @@ class OverlayWindow(QWidget):
         # 原始OCR识别块（合并前）
         self.original_text_blocks = []
         # 测试模式：显示原始OCR识别框（绿色）
-        self.show_original_boxes = True
+        self.show_original_boxes = False
 
         if self.screens:
             self._resize_to_screen()
@@ -1613,8 +1850,8 @@ class OverlayWindow(QWidget):
         if w <= 0 or h <= 0 or not text:
             return
 
-        # 背景色（固定亮度180 + 不透明）
-        bg_color = QColor(180, 180, 180, 255)
+        # 背景色（固定亮度180，透明度由 overlay_alpha 控制）
+        bg_color = QColor(180, 180, 180, overlay_alpha)
         painter.fillRect(x, y, w, h, bg_color)
         # 2像素黑色边框
         painter.setPen(QPen(QColor(0, 0, 0), 2))
@@ -1851,16 +2088,217 @@ class OCRPrecisionSettingsWidget(QWidget):
         reset_paddleocr_instance()
 
 
+# ====================== 覆盖层透明度设置窗口 ======================
+class OverlayTransparencyWidget(QWidget):
+    """浮动调参窗口 - 覆盖层透明度"""
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("覆盖层透明度")
+        self.setWindowFlags(Qt.WindowStaysOnTopHint | Qt.Tool | Qt.FramelessWindowHint)
+        self.setFixedSize(240, 140)
+        self.setStyleSheet("""
+            QWidget { background: #2d2d2d; color: #eee; font-size: 12px; border-radius: 6px; }
+            QSlider::groove:horizontal { height: 6px; background: #555; border-radius: 3px; }
+            QSlider::handle:horizontal { background: #4a9eff; width: 14px; height: 14px; margin: -4px 0; border-radius: 7px; }
+            QLabel { padding: 2px 4px; }
+            QPushButton { background: #555; border: none; padding: 3px 8px; border-radius: 3px; color: #eee; font-size: 11px; }
+            QPushButton:hover { background: #777; }
+        """)
+        
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(8, 4, 8, 4)
+        layout.setSpacing(2)
+        
+        # 透明度滑块 0~100%, 20档
+        h_row = QHBoxLayout()
+        h_row.addWidget(QLabel("透明度"))
+        self.alpha_slider = QSlider(Qt.Horizontal)
+        self.alpha_slider.setRange(0, 20)  # 0~100%, 20档
+        init_val = int(overlay_alpha / 255 * 20)
+        self.alpha_slider.setValue(init_val)
+        alpha_pct = int(init_val * 5)
+        self.alpha_label = QLabel(f"{alpha_pct}%")
+        self.alpha_label.setFixedWidth(35)
+        h_row.addWidget(self.alpha_slider)
+        h_row.addWidget(self.alpha_label)
+        layout.addLayout(h_row)
+        
+        hint = QLabel("0%=完全透明  100%=完全不透明")
+        hint.setStyleSheet("color:#888;font-size:10px;")
+        layout.addWidget(hint)
+        
+        # 按钮行
+        btn_row = QHBoxLayout()
+        reset_btn = QPushButton("恢复默认")
+        reset_btn.setFixedWidth(70)
+        reset_btn.clicked.connect(self._reset)
+        btn_row.addWidget(reset_btn)
+        close_btn = QPushButton("关闭")
+        close_btn.setFixedWidth(60)
+        close_btn.clicked.connect(self.hide)
+        btn_row.addWidget(close_btn)
+        layout.addLayout(btn_row)
+        
+        self.alpha_slider.valueChanged.connect(self._on_alpha_changed)
+    
+    def _on_alpha_changed(self, val):
+        global overlay_alpha
+        alpha = int(val / 20 * 255)
+        overlay_alpha = alpha
+        pct = int(val * 5)
+        self.alpha_label.setText(f"{pct}%")
+        save_config()
+    
+    def _reset(self):
+        global overlay_alpha
+        overlay_alpha = 200
+        self.alpha_slider.setValue(16)  # 16/20 ≈ 80%
+        save_config()
+
+
+# ====================== 翻译过滤设置对话框 ======================
+class TranslationFilterDialog(QDialog):
+    """翻译过滤设置对话框"""
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("翻译设置")
+        self.setFixedSize(380, 300)
+        self.setStyleSheet("""
+            QWidget { font-size: 13px; }
+            QCheckBox { spacing: 8px; font-size: 14px; padding: 4px 0px; }
+            QCheckBox::indicator { width: 18px; height: 18px; }
+            QPushButton { padding: 4px 16px; }
+        """)
+        
+        layout = QVBoxLayout(self)
+        layout.setSpacing(12)
+        
+        # 语言选择
+        lang_row = QHBoxLayout()
+        lang_row.addWidget(QLabel("识别语言:"))
+        self.lang_combo = QComboBox()
+        self.lang_combo.setMinimumWidth(140)
+        layout.addLayout(lang_row)
+        lang_row_w = QWidget()
+        lang_row_w.setLayout(lang_row)
+        layout.addWidget(lang_row_w)
+        
+        # 解析语言选择
+        languages = list(SUPPORTED_LANGUAGES.keys())
+        lang_labels = [f"{SUPPORTED_LANGUAGES[lang]['label']} -> {SUPPORTED_LANGUAGES[lang]['target_lang']}" for lang in languages]
+        current_idx = languages.index(selected_ocr_lang) if selected_ocr_lang in languages else 0
+        self.lang_combo.addItems(lang_labels)
+        self.lang_combo.setCurrentIndex(current_idx)
+        self.lang_combo.currentIndexChanged.connect(self._on_lang_changed)
+        
+        # 分隔线
+        line = QWidget()
+        line.setFixedHeight(1)
+        line.setStyleSheet("background:#555;")
+        layout.addWidget(line)
+        
+        # 勾选项1: 未翻译文字框不参与合并
+        self.cb_untranslated = QCheckBox("完全未翻译的文字框不参与合并")
+        self.cb_untranslated.setChecked(filter_untranslated_separate)
+        self.cb_untranslated.toggled.connect(self._on_filter_changed)
+        layout.addWidget(self.cb_untranslated)
+        
+        # 勾选项2: 拟声词不翻译不合并
+        self.cb_onomatopoeia = QCheckBox("纯粹拟声词，不翻译，不合并")
+        self.cb_onomatopoeia.setChecked(filter_onomatopoeia)
+        self.cb_onomatopoeia.toggled.connect(self._on_filter_changed)
+        layout.addWidget(self.cb_onomatopoeia)
+
+        # 勾选项3: 超大文字框过滤
+        oversized_row = QVBoxLayout()
+        self.cb_oversized = QCheckBox("文字框高度超过中位数平均值")
+        self.cb_oversized.setChecked(filter_oversized)
+        self.cb_oversized.toggled.connect(self._on_filter_changed)
+        oversized_row.addWidget(self.cb_oversized)
+        
+        # 倍率滑块行
+        ratio_row = QHBoxLayout()
+        ratio_row.addSpacing(22)
+        ratio_row.addWidget(QLabel("倍率:"))
+        self.ratio_slider = QSlider(Qt.Horizontal)
+        self.ratio_slider.setRange(10, 20)  # 1.0~2.0, 10档
+        init_val = int(oversized_ratio * 10)
+        self.ratio_slider.setValue(init_val)
+        self.ratio_label = QLabel(f"{self.ratio_slider.value()/10:.1f}x")
+        self.ratio_label.setFixedWidth(35)
+        self.ratio_slider.valueChanged.connect(self._on_ratio_changed)
+        ratio_row.addWidget(self.ratio_slider)
+        ratio_row.addWidget(self.ratio_label)
+        oversized_row.addLayout(ratio_row)
+        
+        hint_oversized = QLabel("用于屏蔽汉化中夸张的效果文字（如「轰！！」「砰！！」等），超过阈值的文字框不翻译、不合并")
+        hint_oversized.setStyleSheet("color:#888;font-size:11px;")
+        hint_oversized.setWordWrap(True)
+        oversized_row.addWidget(hint_oversized)
+        layout.addLayout(oversized_row)
+        
+        hint = QLabel("勾选后，拟声词和超大文字框将保持原文显示，不参与合并和翻译流程")
+        hint.setStyleSheet("color:#888;font-size:11px;")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+        
+        layout.addStretch()
+        
+        # 底部按钮
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        close_btn = QPushButton("关闭")
+        close_btn.setFixedWidth(80)
+        close_btn.clicked.connect(self.close)
+        btn_row.addWidget(close_btn)
+        layout.addLayout(btn_row)
+    
+    def _on_lang_changed(self, idx):
+        global selected_ocr_lang
+        languages = list(SUPPORTED_LANGUAGES.keys())
+        if 0 <= idx < len(languages):
+            lang_code = languages[idx]
+            selected_ocr_lang = lang_code
+            config["ocr_lang"] = lang_code
+            save_config()
+            reset_paddleocr_instance()
+            target = SUPPORTED_LANGUAGES[lang_code]['target_lang']
+            print(f"[成功] 已切换: 识别{SUPPORTED_LANGUAGES[lang_code]['label']}, 翻译成{target}")
+    
+    def _on_filter_changed(self):
+        global filter_untranslated_separate, filter_onomatopoeia, filter_oversized
+        filter_untranslated_separate = self.cb_untranslated.isChecked()
+        filter_onomatopoeia = self.cb_onomatopoeia.isChecked()
+        filter_oversized = self.cb_oversized.isChecked()
+        config["filter_untranslated_separate"] = filter_untranslated_separate
+        config["filter_onomatopoeia"] = filter_onomatopoeia
+        config["filter_oversized"] = filter_oversized
+        save_config()
+        print(f"[信息] 过滤选项: 未翻译分离={filter_untranslated_separate}, 拟声词跳过={filter_onomatopoeia}, 超大框跳过={filter_oversized}({oversized_ratio:.1f}x)")
+    
+    def _on_ratio_changed(self, val):
+        global oversized_ratio
+        oversized_ratio = val / 10.0
+        self.ratio_label.setText(f"{oversized_ratio:.1f}x")
+        config["oversized_ratio"] = oversized_ratio
+        save_config()
+
+
 # ====================== 系统托盘 ======================
 class SystemTray:
 
-    def __init__(self, app: QApplication, merge_settings_widget=None, ocr_precision_widget=None):
+    def __init__(self, app: QApplication, merge_settings_widget=None, ocr_precision_widget=None,
+                 overlay_transparency_widget=None, translation_filter_dialog=None):
         self.app = app
         self.tray = QSystemTrayIcon(app)
         self.tray.setIcon(app.style().standardIcon(QStyle.SP_ComputerIcon))
         self.tray.setToolTip("TransGlass")
         self.merge_settings_widget = merge_settings_widget
         self.ocr_precision_widget = ocr_precision_widget
+        self.overlay_transparency_widget = overlay_transparency_widget
+        self.translation_filter_dialog = translation_filter_dialog
 
         menu = QMenu()
         rec_hk = format_hotkey_display("recognize")
@@ -1881,9 +2319,14 @@ class SystemTray:
 
         menu.addSeparator()
 
-        a_lang = QAction("选择语言", menu)
-        a_lang.triggered.connect(self._select_language)
+        a_lang = QAction("翻译设置", menu)
+        a_lang.triggered.connect(self._open_translation_filter)
         menu.addAction(a_lang)
+
+        # 新增：覆盖层透明度
+        a_overlay = QAction("覆盖层透明度", menu)
+        a_overlay.triggered.connect(self._toggle_overlay_transparency)
+        menu.addAction(a_overlay)
 
         a_merge_set = QAction("合并倍率调节", menu)
         a_merge_set.triggered.connect(self._toggle_merge_settings)
@@ -1920,30 +2363,23 @@ class SystemTray:
         if reason == QSystemTrayIcon.DoubleClick:
             signal_bus.run_recognize.emit()
 
-    def _select_language(self):
-        """选择OCR识别语言（源语言）"""
-        global selected_ocr_lang
-        languages = list(SUPPORTED_LANGUAGES.keys())
-        lang_labels = [f"{SUPPORTED_LANGUAGES[lang]['label']} -> {SUPPORTED_LANGUAGES[lang]['target_lang']}" for lang in languages]
-        
-        current_idx = languages.index(selected_ocr_lang) if selected_ocr_lang in languages else 0
-        
-        lang_label, ok = QInputDialog.getItem(
-            None, "选择识别语言", "选择要识别的源语言（将翻译为目标语言）:", lang_labels, current_idx, False
-        )
-        if ok and lang_label:
-            # 通过索引找到对应的语言代码
-            selected_idx = lang_labels.index(lang_label)
-            if 0 <= selected_idx < len(languages):
-                lang_code = languages[selected_idx]
-                selected_ocr_lang = lang_code
-                config["ocr_lang"] = lang_code
-                save_config()
-                # 重置PaddleOCR实例以使用新语言
-                reset_paddleocr_instance()
-                target = SUPPORTED_LANGUAGES[lang_code]['target_lang']
-                print(f"[成功] 已切换: 识别{SUPPORTED_LANGUAGES[lang_code]['label']}, 翻译成{target}")
-                signal_bus.update_tips.emit(f"[成功] 识别{SUPPORTED_LANGUAGES[lang_code]['label']} -> 翻译成{target}")
+    def _open_translation_filter(self):
+        """打开翻译设置对话框"""
+        if self.translation_filter_dialog:
+            self.translation_filter_dialog.show()
+            self.translation_filter_dialog.raise_()
+            self.translation_filter_dialog.activateWindow()
+
+    def _toggle_overlay_transparency(self):
+        """切换覆盖层透明度窗口显示"""
+        if self.overlay_transparency_widget and self.overlay_transparency_widget.isVisible():
+            self.overlay_transparency_widget.hide()
+        else:
+            if self.overlay_transparency_widget:
+                screen = QGuiApplication.primaryScreen()
+                geo = screen.availableGeometry()
+                self.overlay_transparency_widget.move(geo.right() - 240, geo.bottom() - 170)
+                self.overlay_transparency_widget.show()
 
     def _toggle_merge_settings(self):
         if self.merge_settings_widget and self.merge_settings_widget.isVisible():
@@ -2394,7 +2830,10 @@ class TransGlassApp:
         self.overlay = OverlayWindow()
         self.merge_settings = MergeSettingsWidget()
         self.ocr_precision_settings = OCRPrecisionSettingsWidget()
-        self.tray = SystemTray(self.app, self.merge_settings, self.ocr_precision_settings)
+        self.overlay_transparency = OverlayTransparencyWidget()
+        self.translation_filter_dialog = TranslationFilterDialog()
+        self.tray = SystemTray(self.app, self.merge_settings, self.ocr_precision_settings,
+                               self.overlay_transparency, self.translation_filter_dialog)
         self.hotkey = HotkeyListener()
         self.recognize_thread: Optional[RecognizeThread] = None
         self._is_translating = False
