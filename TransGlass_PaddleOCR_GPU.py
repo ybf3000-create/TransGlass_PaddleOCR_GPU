@@ -513,6 +513,7 @@ class ComicBubbleMerger:
         
         # 拟声词过滤：当选项开启时，拟声词单独成块，不参与合并
         normal_blocks = []
+        ono_blocks = []
         ono_dialogs = []   # 初始化，避免ono_blocks为空时return处报错
         if filter_onomatopoeia:
             for b in filtered:
