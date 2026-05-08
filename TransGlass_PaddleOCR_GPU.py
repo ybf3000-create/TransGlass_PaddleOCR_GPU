@@ -2731,13 +2731,16 @@ class HotkeyListener:
 
         for action_name, emit_fn in self._action_map.items():
             target_keys = set(get_hotkey_keys(action_name))
-            if target_keys and target_keys == self._pressed:
+            if target_keys and target_keys.issubset(self._pressed):
                 emit_fn()
                 break
 
     def _on_release(self, key):
         k = self._normalize_key(key)
         self._pressed.discard(k)
+        # 非修饰键释放时清空集合，防止残留污染下次按键
+        if not self._is_modifier(k):
+            self._pressed.clear()
 
     def get_pressed_modifiers(self) -> list:
         return [k for k in self._pressed if self._is_modifier(k)]
